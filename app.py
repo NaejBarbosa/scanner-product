@@ -1,7 +1,9 @@
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 from pyzbar.pyzbar import decode
 from PIL import Image
 import datetime
+import io
 
 st.set_page_config(page_title="Entrada de Paletes", layout="centered")
 st.title("❄️ Entrada de Paletes - Câmara Fria")
@@ -13,10 +15,10 @@ if "validade" not in st.session_state:
     st.session_state.validade = datetime.date.today()
 
 # Função compartilhada para processar a imagem (foto ou upload)
-def processar_imagem(image_file):
-    if image_file is not None:
+def processar_imagem(image_bytes):
+    if image_bytes is not None:
         try:
-            img = Image.open(image_file)
+            img = Image.open(io.BytesIO(image_bytes))
             decoded_objects = decode(img)
             
             if decoded_objects:
@@ -53,22 +55,33 @@ st.subheader("📷 Capturar Etiqueta")
 aba_camera, aba_upload = st.tabs(["Usar Câmera", "Fazer Upload de Imagem"])
 
 with aba_camera:
-    # Captura a foto direto pelo componente nativo
-    foto_capturada = st.camera_input("Clique abaixo para tirar foto do código", key="camera_scanner")
-    if foto_capturada:
-        processar_imagem(foto_capturada)
+    st.write("Clique no botão abaixo para abrir a câmera traseira:")
+    
+    # Este botão aciona a câmera nativa do celular via JavaScript, forçando a câmera traseira (environment)
+    foto_dados = streamlit_js_eval(
+        component_name="cam", 
+        component_value="foto",
+        args={'mode': 'environment'}, # 'environment' força a câmera traseira
+        key="camera_traseira"
+    )
+    
+    if foto_dados:
+        # O componente retorna os dados em formato de string/bytes dependendo do dispositivo
+        # Convertemos para bytes brutos para processar na nossa função
+        try:
+            processar_imagem(foto_dados)
+        except Exception:
+            st.error("Erro ao carregar os dados da câmera. Se persistir, use a aba de Upload.")
 
 with aba_upload:
-    # Permite o upload de arquivos PNG, JPG ou JPEG
     arquivo_carregado = st.file_uploader("Escolha uma foto da sua galeria", type=["png", "jpg", "jpeg"], key="upload_scanner")
     if arquivo_carregado:
-        processar_imagem(arquivo_carregado)
+        processar_imagem(arquivo_carregado.read())
 
 # --- SEÇÃO DO FORMULÁRIO ---
 st.subheader("📝 Dados do Palete")
 
 with st.form("form_entrada"):
-    # Os campos são preenchidos automaticamente se a imagem for decodificada com sucesso
     ean_input = st.text_input("Código EAN / Produto", value=st.session_state.ean)
     validade_input = st.date_input("Data de Validade", value=st.session_state.validade)
     
@@ -79,12 +92,10 @@ with st.form("form_entrada"):
     submit_button = st.form_submit_button(label="Registrar Entrada 📥")
 
 if submit_button:
-    # Validação simples antes de salvar
     if not ean_input:
         st.error("O código do produto não pode ficar vazio.")
     else:
         st.balloons()
         st.success(f"Palete registrado com sucesso na {camara}!")
-        # Limpa o estado para a próxima leitura
         st.session_state.ean = ""
         st.session_state.validade = datetime.date.today()
