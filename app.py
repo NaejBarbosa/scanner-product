@@ -1,5 +1,4 @@
 import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
 from pyzbar.pyzbar import decode
 from PIL import Image
 import datetime
@@ -15,10 +14,10 @@ if "validade_formatada" not in st.session_state:
     st.session_state.validade_formatada = ""  # Começa vazio se não identificar nada
 
 # Função compartilhada para processar a imagem (foto ou upload)
-def processar_imagem(image_bytes):
-    if image_bytes is not None:
+def processar_imagem(image_file):
+    if image_file is not None:
         try:
-            img = Image.open(io.BytesIO(image_bytes))
+            img = Image.open(image_file)
             decoded_objects = decode(img)
             
             if decoded_objects:
@@ -43,11 +42,11 @@ def processar_imagem(image_bytes):
                                 st.session_state.validade_formatada = f"{dia}/{mes}/{ano}"
                         except Exception:
                             st.warning("Erro ao processar padrão GS1-128.")
-                            st.session_state.validade_formatada = "" # Garante que fica vazio em erro
+                            st.session_state.validade_formatada = ""
                     else:
                         # Código simples ou QR Code comum (não traz a validade junto)
                         st.session_state.ean = codigo_puro
-                        st.session_state.validade_formatada = "" # Mantém vazio para digitação manual
+                        st.session_state.validade_formatada = ""
                         st.info("Código simples detectado. Insira a validade manualmente.")
                     break
             else:
@@ -60,25 +59,15 @@ st.subheader("📷 Capturar Etiqueta")
 aba_camera, aba_upload = st.tabs(["Usar Câmera", "Fazer Upload de Imagem"])
 
 with aba_camera:
-    st.write("Clique no botão abaixo para abrir a câmera traseira:")
-    
-    foto_dados = streamlit_js_eval(
-        component_name="cam", 
-        component_value="foto",
-        args={'mode': 'environment'},
-        key="camera_traseira"
-    )
-    
-    if foto_dados:
-        try:
-            processar_imagem(foto_dados)
-        except Exception:
-            st.error("Erro ao carregar os dados da câmera. Se persistir, use a aba de Upload.")
+    # Retornado para o componente nativo do Streamlit, sem forçar câmera traseira
+    foto_capturada = st.camera_input("Clique abaixo para tirar foto do código", key="camera_scanner")
+    if foto_capturada:
+        processar_imagem(foto_capturada)
 
 with aba_upload:
     arquivo_carregado = st.file_uploader("Escolha uma foto da sua galeria", type=["png", "jpg", "jpeg"], key="upload_scanner")
     if arquivo_carregado:
-        processar_imagem(arquivo_carregado.read())
+        processar_imagem(arquivo_carregado)
 
 # --- SEÇÃO DO FORMULÁRIO ---
 st.subheader("📝 Dados do Palete")
@@ -86,7 +75,6 @@ st.subheader("📝 Dados do Palete")
 with st.form("form_entrada"):
     ean_input = st.text_input("Código EAN / Produto", value=st.session_state.ean)
     
-    # Mudado para text_input para permitir iniciar vazio e usar placeholder de exemplo
     validade_input = st.text_input(
         "Data de Validade", 
         value=st.session_state.validade_formatada,
