@@ -4,7 +4,9 @@ from PIL import Image
 import re
 import datetime
 import io
-import pytesseract  # OCR leve para leitura de texto nas imagens
+import numpy as np
+import cv2  # Biblioteca para processamento digital de imagens
+import pytesseract
 
 st.set_page_config(page_title="Entrada de Paletes", layout="centered")
 st.title("❄️ Entrada de Paletes - Câmara Fria")
@@ -17,54 +19,79 @@ if "validade_formatada" not in st.session_state:
 
 # Função para extrair o EAN correto de sequências numéricas longas
 def limpar_e_filtrar_ean(codigo_bruto):
-    # Remove qualquer caractere que não seja número
     codigo_limpo = re.sub(r"\D", "", codigo_bruto)
     
-    # Se for uma sequência muito grande (Ex: código de barras logístico longo de 30-40 dígitos)
     if len(codigo_limpo) > 14:
-        # Geralmente em etiquetas industriais de código longo (como GS1), o EAN vem após os dígitos iniciais "01"
         if codigo_limpo.startswith("01") and len(codigo_limpo) >= 16:
-            return codigo_limpo[2:16] # Retorna os 14 dígitos comerciais (EAN/DUN-14)
+            return codigo_limpo[2:16]
         
-        # Fallback: Tenta localizar uma sequência típica de EAN-13 ou DUN-14 dentro da string longa
         match = re.search(r"\b(\d{13,14})\b", codigo_limpo)
         if match:
             return match.group(1)
             
-        # Segundo Fallback: pega os primeiros 14 dígitos numéricos que fazem sentido comercial
         return codigo_limpo[:14]
         
     return codigo_limpo
 
+# Função avançada para tratar a imagem e melhorar a leitura do OCR
+def tratar_imagem_para_ocr(img_pil):
+    # Converte a imagem PIL para o formato do OpenCV (numpy array BGR)
+    img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    
+    # 1. Converte para tons de cinza (essencial para OCR)
+    cinza = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    
+    # 2. Melhora o contraste adaptativo (CLAHE) - Excelente para corrigir sombras e reflexos de plástico
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    contraste = clahe.apply(cinza)
+    
+    # 3. Limiarização Adaptativa (Binarização) - Transforma o fundo em branco puro e as letras em preto puro
+    binaria = cv2.adaptiveThreshold(
+        contraste, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    
+    # Converte de volta para imagem PIL para que o Pytesseract possa ler
+    return Image.fromarray(binaria)
+
 # Função para buscar data escrita na etiqueta por meio de processamento de texto (OCR)
 def extrair_validade_por_ocr(img):
     try:
-        # Extrai o texto da imagem usando o idioma português
-        texto_completo = pytesseract.image_to_string(img, lang='por').upper()
+        # Aplica o tratamento de imagem antes de rodar o leitor de texto
+        img_tratada = tratar_imagem_para_ocr(img)
         
-        # Expressão regular para capturar datas no formato DD/MM/AA ou DD/MM/AAAA
-        padrao_data = r"\b(\d{2}/\d{2}/\d{2,4})\b"
+        # Opcional: Descomente a linha abaixo caso queira ver a imagem tratada na barra lateral para testes
+        # st.sidebar.image(img_tratada, caption="Imagem Otimizada para o OCR")
+
+        # Configuração do Tesseract voltada para leitura de blocos de texto estruturados (--psm 3 ou 6)
+        config_tesseract = r'--psm 3'
+        texto_completo = pytesseract.image_to_string(img_tratada, lang='por', config=config_tesseract).upper()
         
-        # Palavras-chave comuns encontradas em etiquetas de paletes/caixas
-        gatilhos = ["VALIDADE", "VAL.", "VAL:", "VENC", "VENCIMENTO", "VAL/DE"]
+        # Remove espaços extras para evitar que datas com espaços (ex: 11 / 01 / 27) quebrem o Regex
+        texto_completo = re.sub(r'\s+', ' ', texto_completo)
+        
+        # Expressão regular flexível para capturar datas no formato DD/MM/AA ou DD/MM/AAAA
+        padrao_data = r"(\d{2}/\d{2}/\d{2,4})"
+        
+        # Palavras-chave de gatilho comuns em etiquetas industriais e logísticas
+        gatilhos = ["VALIDADE", "VAL.", "VAL:", "VENC", "VENCIMENTO", "VAL/DE", "FABRICAÇÃO", "DATA"]
         
         for gatilho in gatilhos:
             if gatilho in texto_completo:
-                # Isola o texto a partir do ponto onde a palavra-chave foi localizada
                 posicao = texto_completo.find(gatilho)
-                texto_posterior = texto_completo[posicao:]
+                # Pega os 40 caracteres subsequentes à palavra-chave para análise
+                texto_posterior = texto_completo[posicao:posicao+40]
                 
-                # Encontra todas as ocorrências de data no bloco de texto recortado
                 datas_encontradas = re.findall(padrao_data, texto_posterior)
                 if datas_encontradas:
-                    data_crua = datas_encontradas[0]
+                    data_crua = datas_encontradas[0] # Pega a primeira data que aparecer após o gatilho
                     
-                    # Garante que o ano tenha 4 dígitos (ex: converte "27" para "2027")
+                    # Padroniza o ano com 4 dígitos (ex: 27 -> 2027)
                     partes = data_crua.split("/")
                     if len(partes[2]) == 2:
                         partes[2] = "20" + partes[2]
                         
                     return f"{partes[0]}/{partes[1]}/{partes[2]}"
+                    
         return None
     except Exception as e:
         st.sidebar.error(f"Aviso do processador visual: {e}")
@@ -86,25 +113,21 @@ def processar_imagem(image_file):
                     # Tratamento se o código lido for o padrão GS1-128 completo
                     if len(codigo_puro) >= 24 and codigo_puro.startswith("01"):
                         try:
-                            # Isola os 14 dígitos do produto comercial (posições 2 a 16)
                             st.session_state.ean = codigo_puro[2:16]
                             
                             if "17" in codigo_puro[16:19]:
                                 idx_17 = codigo_puro.find("17", 16)
                                 data_str = codigo_puro[idx_17+2 : idx_17+8]
 
-                                # Extrai os dados no formato AAMMDD
                                 ano = "20" + data_str[0:2]
                                 mes = data_str[2:4]
                                 dia = data_str[4:6]
 
-                                # Salva formatado em padrão brasileiro (dd/mm/aaaa)
                                 st.session_state.validade_formatada = f"{dia}/{mes}/{ano}"
                         except Exception:
                             st.warning("Erro ao processar padrão GS1-128.")
                             st.session_state.validade_formatada = ""
                     else:
-                        # Se capturou um código numérico longo genérico, aplica a limpeza para extrair o EAN correto
                         st.session_state.ean = limpar_e_filtrar_ean(codigo_puro)
                         st.session_state.validade_formatada = ""
                     break
@@ -113,8 +136,7 @@ def processar_imagem(image_file):
                 st.session_state.ean = ""
                 st.session_state.validade_formatada = ""
 
-            # --- PASSO 2: FALLBACK PARA LEITURA VISUAL DA VALIDADE (OCR) ---
-            # Se a validade não pôde ser extraída do código de barras, busca no texto impresso da etiqueta
+            # --- PASSO 2: FALLBACK PARA LEITURA VISUAL DA VALIDADE (OCR TRATADO) ---
             if not st.session_state.validade_formatada:
                 data_ocr = extrair_validade_por_ocr(img)
                 if data_ocr:
