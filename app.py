@@ -15,6 +15,27 @@ if "ean" not in st.session_state:
 if "validade_formatada" not in st.session_state:
     st.session_state.validade_formatada = ""
 
+# Função para extrair o EAN correto de sequências numéricas longas
+def limpar_e_filtrar_ean(codigo_bruto):
+    # Remove qualquer caractere que não seja número
+    codigo_limpo = re.sub(r"\D", "", codigo_bruto)
+    
+    # Se for uma sequência muito grande (Ex: código de barras logístico longo de 30-40 dígitos)
+    if len(codigo_limpo) > 14:
+        # Geralmente em etiquetas industriais de código longo (como GS1), o EAN vem após os dígitos iniciais "01"
+        if codigo_limpo.startswith("01") and len(codigo_limpo) >= 16:
+            return codigo_limpo[2:16] # Retorna os 14 dígitos comerciais (EAN/DUN-14)
+        
+        # Fallback: Tenta localizar uma sequência típica de EAN-13 ou DUN-14 dentro da string longa
+        match = re.search(r"\b(\d{13,14})\b", codigo_limpo)
+        if match:
+            return match.group(1)
+            
+        # Segundo Fallback: pega os primeiros 14 dígitos numéricos que fazem sentido comercial
+        return codigo_limpo[:14]
+        
+    return codigo_limpo
+
 # Função para buscar data escrita na etiqueta por meio de processamento de texto (OCR)
 def extrair_validade_por_ocr(img):
     try:
@@ -60,12 +81,14 @@ def processar_imagem(image_file):
             if decoded_objects:
                 for obj in decoded_objects:
                     codigo_puro = obj.data.decode("utf-8")
-                    st.success(f"Código detectado: {codigo_puro}")
+                    st.success(f"Código detectado na etiqueta: {codigo_puro}")
 
-                    # Lógica para processar padrão GS1-128 (Etiquetas de caixas)
+                    # Tratamento se o código lido for o padrão GS1-128 completo
                     if len(codigo_puro) >= 24 and codigo_puro.startswith("01"):
                         try:
+                            # Isola os 14 dígitos do produto comercial (posições 2 a 16)
                             st.session_state.ean = codigo_puro[2:16]
+                            
                             if "17" in codigo_puro[16:19]:
                                 idx_17 = codigo_puro.find("17", 16)
                                 data_str = codigo_puro[idx_17+2 : idx_17+8]
@@ -81,8 +104,8 @@ def processar_imagem(image_file):
                             st.warning("Erro ao processar padrão GS1-128.")
                             st.session_state.validade_formatada = ""
                     else:
-                        # Código simples ou QR Code comum (não traz a validade embutida)
-                        st.session_state.ean = codigo_puro
+                        # Se capturou um código numérico longo genérico, aplica a limpeza para extrair o EAN correto
+                        st.session_state.ean = limpar_e_filtrar_ean(codigo_puro)
                         st.session_state.validade_formatada = ""
                     break
             else:
@@ -91,7 +114,7 @@ def processar_imagem(image_file):
                 st.session_state.validade_formatada = ""
 
             # --- PASSO 2: FALLBACK PARA LEITURA VISUAL DA VALIDADE (OCR) ---
-            # Se a validade não pôde ser extraída do código de barras, busca no texto impresso
+            # Se a validade não pôde ser extraída do código de barras, busca no texto impresso da etiqueta
             if not st.session_state.validade_formatada:
                 data_ocr = extrair_validade_por_ocr(img)
                 if data_ocr:
