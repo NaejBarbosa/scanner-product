@@ -3,3 +3,5 @@ pyzbar
 pillow
 numpy
 pytesseract
+opencv-python
+
