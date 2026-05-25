@@ -2,104 +2,103 @@ import streamlit as st
 from pyzbar.pyzbar import decode
 from PIL import Image
 import re
-import easyocr  # Importante: instale via pip install easyocr
-import numpy as np
+import datetime
+import io
+import pytesseract  # OCR leve para leitura de texto nas imagens
 
 st.set_page_config(page_title="Entrada de Paletes", layout="centered")
 st.title("❄️ Entrada de Paletes - Câmara Fria")
 
-# Inicializa o leitor de OCR (armazenado em cache para não recarregar a cada clique)
-@st.cache_resource
-def carregar_leitor_ocr():
-    return easyocr.Reader(['pt']) # Define o idioma para português
-
-reader = carregar_leitor_ocr()
-
+# Inicializa variáveis no estado da sessão do Streamlit
 if "ean" not in st.session_state:
     st.session_state.ean = ""
 if "validade_formatada" not in st.session_state:
     st.session_state.validade_formatada = ""
 
-# Função para buscar data escrita no texto da imagem via OCR
+# Função para buscar data escrita na etiqueta por meio de processamento de texto (OCR)
 def extrair_validade_por_ocr(img):
     try:
-        # Converte a imagem PIL para formato aceito pelo EasyOCR
-        img_np = np.array(img)
-        resultados = reader.readtext(img_np)
-        
-        # Junta todas as linhas de texto detectadas
-        texto_completo = " ".join([res[1].upper() for res in resultados])
+        # Extrai o texto da imagem usando o idioma português
+        texto_completo = pytesseract.image_to_string(img, lang='por').upper()
         
         # Expressão regular para capturar datas no formato DD/MM/AA ou DD/MM/AAAA
         padrao_data = r"\b(\d{2}/\d{2}/\d{2,4})\b"
         
-        # Palavras-chave comuns em etiquetas industriais
-        gatilhos = ["VALIDADE", "VAL.", "VAL:", "VENC", "VENCIMENTO"]
+        # Palavras-chave comuns encontradas em etiquetas de paletes/caixas
+        gatilhos = ["VALIDADE", "VAL.", "VAL:", "VENC", "VENCIMENTO", "VAL/DE"]
         
         for gatilho in gatilhos:
             if gatilho in texto_completo:
-                # Corta o texto a partir de onde achou a palavra "Validade"
+                # Isola o texto a partir do ponto onde a palavra-chave foi localizada
                 posicao = texto_completo.find(gatilho)
                 texto_posterior = texto_completo[posicao:]
                 
-                # Procura a primeira data que aparece logo após a palavra-chave
+                # Encontra todas as ocorrências de data no bloco de texto recortado
                 datas_encontradas = re.findall(padrao_data, texto_posterior)
                 if datas_encontradas:
                     data_crua = datas_encontradas[0]
-                    # Garante o formato de 4 dígitos para o ano (ex: 27 -> 2027)
-                    partes = data_crua.split("/")
-                    if len(partes)[2] == 2:
-                        partes[2] = "20" + partes[2]
-                    return f"{partes[0]}/{partes[1]}/{partes[2]}"
                     
+                    # Garante que o ano tenha 4 dígitos (ex: converte "27" para "2027")
+                    partes = data_crua.split("/")
+                    if len(partes[2]) == 2:
+                        partes[2] = "20" + partes[2]
+                        
+                    return f"{partes[0]}/{partes[1]}/{partes[2]}"
         return None
     except Exception as e:
-        st.sidebar.error(f"Erro no OCR: {e}")
+        st.sidebar.error(f"Aviso do processador visual: {e}")
         return None
 
-# Função compartilhada para processar a imagem
+# Função compartilhada para processar a imagem (foto ou upload)
 def processar_imagem(image_file):
     if image_file is not None:
         try:
             img = Image.open(image_file)
             decoded_objects = decode(img)
 
-            # 1. TENTA PROCESSAR O CÓDIGO DE BARRAS
+            # --- PASSO 1: TENTATIVA DE LEITURA DO CÓDIGO DE BARRAS ---
             if decoded_objects:
                 for obj in decoded_objects:
                     codigo_puro = obj.data.decode("utf-8")
                     st.success(f"Código detectado: {codigo_puro}")
 
-                    # Lógica GS1-128 original
+                    # Lógica para processar padrão GS1-128 (Etiquetas de caixas)
                     if len(codigo_puro) >= 24 and codigo_puro.startswith("01"):
                         try:
                             st.session_state.ean = codigo_puro[2:16]
                             if "17" in codigo_puro[16:19]:
                                 idx_17 = codigo_puro.find("17", 16)
                                 data_str = codigo_puro[idx_17+2 : idx_17+8]
+
+                                # Extrai os dados no formato AAMMDD
                                 ano = "20" + data_str[0:2]
                                 mes = data_str[2:4]
                                 dia = data_str[4:6]
+
+                                # Salva formatado em padrão brasileiro (dd/mm/aaaa)
                                 st.session_state.validade_formatada = f"{dia}/{mes}/{ano}"
                         except Exception:
                             st.warning("Erro ao processar padrão GS1-128.")
                             st.session_state.validade_formatada = ""
                     else:
+                        # Código simples ou QR Code comum (não traz a validade embutida)
                         st.session_state.ean = codigo_puro
                         st.session_state.validade_formatada = ""
                     break
             else:
-                st.info("Nenhum código de barras linear lido. Tentando identificar via texto...")
+                st.info("Nenhum código de barras linear identificado. Tentando leitura visual...")
                 st.session_state.ean = ""
+                st.session_state.validade_formatada = ""
 
-            # 2. SE A VALIDADE ESTIVER VAZIA, TENTA BUSCAR POR OCR NA IMAGEM
+            # --- PASSO 2: FALLBACK PARA LEITURA VISUAL DA VALIDADE (OCR) ---
+            # Se a validade não pôde ser extraída do código de barras, busca no texto impresso
             if not st.session_state.validade_formatada:
                 data_ocr = extrair_validade_por_ocr(img)
                 if data_ocr:
                     st.session_state.validade_formatada = data_ocr
-                    st.success(f"Validade identificada visualmente: {data_ocr}")
+                    st.success(f"Data capturada via texto: {data_ocr}")
                 else:
-                    st.warning("Não foi possível ler a validade automaticamente. Digite manualmente.")
+                    st.warning("Data de validade não encontrada automaticamente. Digite no campo abaixo.")
 
         except Exception as e:
             st.error(f"Erro ao processar o arquivo de imagem: {e}")
@@ -144,5 +143,7 @@ if submit_button:
     else:
         st.balloons()
         st.success(f"Palete registrado com sucesso na {camara}!")
+
+        # Limpa o estado para a próxima leitura
         st.session_state.ean = ""
         st.session_state.validade_formatada = ""
