@@ -6,20 +6,30 @@ import numpy as np
 import cv2
 import pytesseract
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import queue # Fila segura para comunicação entre Threads
 
-st.set_page_config(page_title="Entrada de Paletes", layout="wide") # Layout wide para tela maior
+st.set_page_config(page_title="Entrada de Paletes", layout="wide") # Maximiza a largura da tela
 st.title("❄️ Entrada de Paletes - Automação Câmara Fria")
 
-# Configuração estável do protocolo WebRTC para conexões em redes móveis/Wi-Fi
+# Configuração estável e atualizada do servidor ICE (STUN) com portas explícitas
 RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:://google.com"]}]}
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]}
+        ]
+    }
 )
 
-# Inicializa as variáveis de estado caso não existam
+# Inicializa variáveis no estado da sessão do Streamlit
 if "ean" not in st.session_state:
     st.session_state.ean = ""
 if "validade_formatada" not in st.session_state:
     st.session_state.validade_formatada = ""
+
+# Criamos uma fila thread-safe global para receber os dados detectados pela câmera
+if "fila_dados" not in st.session_state:
+    st.session_state.fila_dados = queue.Queue()
 
 # --- FUNÇÕES DE LIMPEZA E TRATAMENTO VISUAL ---
 
@@ -68,73 +78,103 @@ def extrair_validade_por_ocr(img_cv):
     except Exception:
         return None
 
-# --- PROCESSADOR DE VÍDEO EM TEMPO REAL ---
+# --- PROCESSADOR DE VÍDEO EM TEMPO REAL (THREAD ISOLADA) ---
 
 class DetectorAutomatico(VideoProcessorBase):
     def recv(self, frame):
-        # Converte o frame atual do vídeo para formato OpenCV (BGR)
         img_cv = frame.to_ndarray(format="bgr24")
         
-        # Só realiza a busca se os campos atuais do formulário estiverem vazios
-        if not st.session_state.ean or not st.session_state.validade_formatada:
+        # 1. Busca código de barras no frame atual
+        decoded_objects = decode(img_cv)
+        ean_detectado = None
+        validade_detectada = None
+
+        if decoded_objects:
+            for obj in decoded_objects:
+                codigo_puro = obj.data.decode("utf-8")
+                
+                if len(codigo_puro) >= 24 and codigo_puro.startswith("01"):
+                    try:
+                        ean_detectado = codigo_puro[2:16]
+                        if "17" in codigo_puro[16:19]:
+                            idx_17 = codigo_puro.find("17", 16)
+                            data_str = codigo_puro[idx_17+2 : idx_17+8]
+                            validade_detectada = f"{data_str[4:6]}/{data_str[2:4]}/20{data_str[0:2]}"
+                    except Exception:
+                        pass
+                else:
+                    ean_detectado = limpar_e_filtrar_ean(codigo_puro)
+                break
+        
+        # 2. Se achou código de barras mas não a validade, tenta extrair via OCR
+        if ean_detectado and not validade_detectada:
+            validade_detectada = extrair_validade_por_ocr(img_cv)
             
-            # 1. Tentativa com código de barras no frame atual
-            decoded_objects = decode(img_cv)
-            if decoded_objects:
-                for obj in decoded_objects:
-                    codigo_puro = obj.data.decode("utf-8")
-                    
-                    if len(codigo_puro) >= 24 and codigo_puro.startswith("01"):
-                        try:
-                            st.session_state.ean = codigo_puro[2:16]
-                            if "17" in codigo_puro[16:19]:
-                                idx_17 = codigo_puro.find("17", 16)
-                                data_str = codigo_puro[idx_17+2 : idx_17+8]
-                                st.session_state.validade_formatada = f"{data_str[4:6]}/{data_str[2:4]}/20{data_str[0:2]}"
-                        except Exception:
-                            pass
-                    else:
-                        st.session_state.ean = limpar_e_filtrar_ean(codigo_puro)
-                    break
-            
-            # 2. Se o código de barras não trouxe a validade, aplica OCR no frame atual
-            if st.session_state.ean and not st.session_state.validade_formatada:
-                data_ocr = extrair_validade_por_ocr(img_cv)
-                if data_ocr:
-                    st.session_state.validade_formatada = data_ocr
+        # Se capturou pelo menos uma das informações, envia de forma segura para a fila
+        if ean_detectado or validade_detectada:
+            st.session_state.fila_dados.put({"ean": ean_detectado, "validade": validade_detectada})
 
         return frame
 
-# --- DIVISÃO DA TELA (LAYOUT MAIOR E LADO A LADO) ---
+# --- RENDERIZAÇÃO DA INTERFACE LADO A LADO ---
 
-col_camera, col_formulario = st.columns([1.3, 1.0], gap="large")
+# Captura de forma assíncrona os dados gerados pela thread da câmera
+try:
+    # Se houver dados novos enviados pela câmera na fila, processa
+    dados_capturados = st.session_state.fila_dados.get_nowait()
+    if dados_capturados.get("ean"):
+        st.session_state.ean = dados_capturados["ean"]
+    if dados_capturados.get("validade"):
+        st.session_state.validade_formatada = dados_capturados["validade"]
+except queue.Empty:
+    pass
+
+# Divisão de espaço na tela (Dando maior peso visual para a câmera)
+col_camera, col_formulario = st.columns([1.5, 1.0], gap="large")
 
 with col_camera:
-    st.subheader("📷 Scanner Automático em Tempo Real")
-    st.info("Aponte a câmera para a etiqueta. O sistema fará a leitura contínua e preencherá o formulário automaticamente.")
+    st.subheader("📷 Scanner Contínuo Automático")
+    st.caption("Aponte para o código de barras ou o bloco de texto de validade da caixa.")
     
-    # Renderiza o componente de vídeo contínuo ocupando o espaço máximo da coluna
+    # CSS customizado para garantir que o container do player de vídeo ocupe 100% do espaço da coluna
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stWebRtcStreamer"] video {
+            width: 100% !important;
+            height: auto !important;
+            max-height: 550px;
+            border-radius: 10px;
+            border: 2px solid #4CAF50;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Streamer de vídeo otimizado
     webrtc_streamer(
         key="scanner_continuo",
         video_processor_factory=DetectorAutomatico,
         rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False}, # Força câmera traseira no celular
+        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False},
     )
     
-    # Botão auxiliar para resetar os campos e permitir uma nova leitura
-    if st.button("🔄 Limpar Campos para Novo Escaneamento"):
+    if st.button("🔄 Limpar Campos / Nova Leitura", use_container_width=True):
         st.session_state.ean = ""
         st.session_state.validade_formatada = ""
+        # Limpa restos pendentes na fila
+        while not st.session_state.fila_dados.empty():
+            st.session_state.fila_dados.get()
         st.rerun()
 
 with col_formulario:
     st.subheader("📝 Dados do Palete")
 
-    # Exibe alertas visuais de sucesso dinâmicos fora do loop de renderização do vídeo
     if st.session_state.ean:
         st.success(f"✓ Código do Produto capturado!")
     if st.session_state.validade_formatada:
-        st.success(f"✓ Data de validade capturada: {st.session_state.validade_formatada}")
+        st.success(f"✓ Data de validade capturada!")
 
     with st.form("form_entrada"):
         ean_input = st.text_input("Código EAN / Produto", value=st.session_state.ean)
@@ -149,7 +189,7 @@ with col_formulario:
         camara = st.selectbox("Câmara de Destino", ["Câmara Fria 01", "Câmara Fria 02", "Congelados 01"])
         operador = st.text_input("Nome do Operador")
 
-        submit_button = st.form_submit_button(label="Registrar Entrada 📥")
+        submit_button = st.form_submit_button(label="Registrar Entrada 📥", use_container_width=True)
 
     if submit_button:
         if not ean_input:
@@ -160,7 +200,9 @@ with col_formulario:
             st.balloons()
             st.success(f"Palete registrado com sucesso na {camara}!")
             
-            # Reseta as variáveis para a próxima caixa automática
+            # Limpa tudo para o próximo palete
             st.session_state.ean = ""
             st.session_state.validade_formatada = ""
+            while not st.session_state.fila_dados.empty():
+                st.session_state.fila_dados.get()
             st.rerun()
